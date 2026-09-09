@@ -19,7 +19,9 @@ before the importer exits. Vendor bytes are not persisted under `/data`,
 preserving compatibility with an older confirmed rollback image's userdata
 allowlist.
 
-Normal boot requires the exact size and SHA-256 contract in the TSV. The setup
+Normal boot requires one complete exact size and SHA-256 contract from the
+shipped TSV set. A boot must match all four records from one specification;
+records from different stock revisions are never mixed. The setup
 API may schedule the mode-`0600` one-shot marker
 `/data/libreecho/config/vendor-import-force-next-boot` with the exact payload
 `force-unverified-owner-local-import-v1`. On the next boot only, this permits an

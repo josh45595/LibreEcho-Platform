@@ -44,7 +44,8 @@ BOOT_ENVELOPE_SHA256 = "e83e11b9ef8338cf3262144870790d2b005df16baf4d119849658943
 PROVEN_ZIMAGE_SHA256 = "4e144959eb0ffaee91b37d05a0f871863a74f4abb1bad0474c2fec358d5176a6"
 PROVEN_SYSTEM_MAP_SHA256 = "527292112edd28e8facf2998eefe2224b08a05b193efc73634cd998e9113ba95"
 CONNECTIVITY_BUNDLE_ID = "mt8163-v181-stock-v1"
-CONNECTIVITY_IMPORTER_SHA256 = "7601145a15750abce6a4c21d20326ecbdc1e4dc36e5670c0ca3cc9d1bf1f1326"
+CONNECTIVITY_COMPATIBLE_BUNDLE_ID = "mt8163-v181-stock-v2"
+CONNECTIVITY_IMPORTER_SHA256 = "9597087d910db2eaee7ca6629f763cf9331bc9e859f318d833edf35628b5481b"
 WPA_SUPPLICANT_VERSION = "2.10"
 WPA_SOURCE_SHA256 = "20df7ae5154b3830355f8ab4269123a87affdea59fe74fe9292a91d0d7e17b2f"
 WPA_SOURCE_URL = "https://w1.fi/releases/wpa_supplicant-2.10.tar.gz"
@@ -82,6 +83,33 @@ CONNECTIVITY_ASSET_REQUIREMENTS: dict[str, dict[str, str | int]] = {
         "source": "etc/firmware/WMT_SOC.cfg", "mode": 0o644, "size": 119,
         "sha256": "302bd4462de99c028c04092e561c1500d65582ce42a93c4c72ccae6e2c99013d",
     },
+}
+
+CONNECTIVITY_COMPATIBLE_ASSET_REQUIREMENTS: dict[str, dict[str, str | int]] = {
+    "ROMv2_lm_patch_1_0_hdr.bin": {
+        "source": "etc/firmware/ROMv2_lm_patch_1_0_hdr.bin", "mode": 0o644,
+        "size": 128720,
+        "sha256": "b4460117f51a43f3284594ec08d8c8861ecc0e42b17820987da03ecabdebac1e",
+    },
+    "ROMv2_lm_patch_1_1_hdr.bin": {
+        "source": "etc/firmware/ROMv2_lm_patch_1_1_hdr.bin", "mode": 0o644,
+        "size": 50148,
+        "sha256": "10c4ed22a10b8a136bffd7ffce4d552300d76f8e593627d2a9841c3b11a5697e",
+    },
+    "WIFI_RAM_CODE_8163": {
+        "source": "etc/firmware/WIFI_RAM_CODE_8163", "mode": 0o644,
+        "size": 373840,
+        "sha256": "9669cc9b03cfdc5e8fd4fd6e14c4c4050e8c196738ca4707eea12f14a6a8e64c",
+    },
+    "WMT_SOC.cfg": {
+        "source": "etc/firmware/WMT_SOC.cfg", "mode": 0o644, "size": 119,
+        "sha256": "302bd4462de99c028c04092e561c1500d65582ce42a93c4c72ccae6e2c99013d",
+    },
+}
+
+CONNECTIVITY_ASSET_SETS = {
+    CONNECTIVITY_BUNDLE_ID: CONNECTIVITY_ASSET_REQUIREMENTS,
+    CONNECTIVITY_COMPATIBLE_BUNDLE_ID: CONNECTIVITY_COMPATIBLE_ASSET_REQUIREMENTS,
 }
 
 CONNECTIVITY_HELPERS = {
@@ -284,10 +312,7 @@ def add_connectivity_runtime_symlinks(stage: Path) -> dict[str, str]:
 
 def add_connectivity_bundle(stage: Path, helpers: dict[str, Path],
                             manifest: dict[str, object]) -> None:
-    specification_path = stage / f"etc/libreecho/vendor-assets/{CONNECTIVITY_BUNDLE_ID}.tsv"
     importer_path = stage / "usr/local/sbin/libreecho-vendor-import"
-    if not specification_path.is_file() or specification_path.is_symlink():
-        raise SystemExit("ERROR: local vendor-asset specification is missing")
     if not importer_path.is_file() or importer_path.is_symlink():
         raise SystemExit("ERROR: local vendor-asset importer is missing")
     importer_data = read(importer_path)
@@ -295,26 +320,46 @@ def add_connectivity_bundle(stage: Path, helpers: dict[str, Path],
         "local vendor-asset importer", importer_data, CONNECTIVITY_IMPORTER_SHA256
     )
 
-    expected_lines = []
-    requirement_records: dict[str, dict[str, object]] = {}
-    for target_name, specification in CONNECTIVITY_ASSET_REQUIREMENTS.items():
-        expected_hash = str(specification["sha256"])
-        expected_size = int(specification["size"])
-        source_name = str(specification["source"])
-        expected_lines.append(
-            f"{expected_hash}|{expected_size}|{source_name}|{target_name}\n"
-        )
-        requirement_records[target_name] = {
-            "source": source_name,
-            "sha256": expected_hash,
-            "size": expected_size,
-            "mode": "0600",
-            "persistent_path": f"/data/libreecho/vendor/{CONNECTIVITY_BUNDLE_ID}/{target_name}",
-            "runtime_path": f"/lib/firmware/{target_name}",
+    compatible_sets: dict[str, dict[str, object]] = {}
+    for bundle_id, asset_requirements in CONNECTIVITY_ASSET_SETS.items():
+        specification_path = stage / f"etc/libreecho/vendor-assets/{bundle_id}.tsv"
+        if not specification_path.is_file() or specification_path.is_symlink():
+            raise SystemExit("ERROR: local vendor-asset specification is missing")
+        expected_lines = []
+        requirement_records: dict[str, dict[str, object]] = {}
+        for target_name, specification in asset_requirements.items():
+            expected_hash = str(specification["sha256"])
+            expected_size = int(specification["size"])
+            source_name = str(specification["source"])
+            expected_lines.append(
+                f"{expected_hash}|{expected_size}|{source_name}|{target_name}\n"
+            )
+            requirement_records[target_name] = {
+                "source": source_name,
+                "sha256": expected_hash,
+                "size": expected_size,
+                "mode": "0600",
+                "persistent_path": f"/data/libreecho/vendor/{bundle_id}/{target_name}",
+                "runtime_path": f"/lib/firmware/{target_name}",
+            }
+        specification_data = read(specification_path)
+        if specification_data != "".join(expected_lines).encode():
+            raise SystemExit("ERROR: local vendor-asset specification changed")
+        compatible_sets[bundle_id] = {
+            "required_vendor_assets": requirement_records,
+            "required_vendor_bytes": sum(
+                int(specification["size"])
+                for specification in asset_requirements.values()
+            ),
+            "requirements_manifest": {
+                "path": f"/etc/libreecho/vendor-assets/{bundle_id}.tsv",
+                "sha256": sha256(specification_data),
+                "size": len(specification_data),
+                "mode": "0644",
+            },
         }
-    specification_data = read(specification_path)
-    if specification_data != "".join(expected_lines).encode():
-        raise SystemExit("ERROR: local vendor-asset specification changed")
+
+    primary_set = compatible_sets[CONNECTIVITY_BUNDLE_ID]
 
     helper_records: dict[str, object] = {}
     for target_name, (argument_name, expected_size, expected_hash) in CONNECTIVITY_HELPERS.items():
@@ -350,27 +395,20 @@ def add_connectivity_bundle(stage: Path, helpers: dict[str, Path],
         "vendor_delivery": "owner-device-local-extraction",
         "source_partition": "system_a-read-only",
         "embedded_vendor_file_count": 0,
-        "required_vendor_file_count": len(requirement_records),
-        "required_vendor_bytes": sum(
-            int(specification["size"])
-            for specification in CONNECTIVITY_ASSET_REQUIREMENTS.values()
-        ),
+        "required_vendor_file_count": len(CONNECTIVITY_ASSET_REQUIREMENTS),
+        "required_vendor_bytes": primary_set["required_vendor_bytes"],
         "helper_count": len(helper_records),
         "payload_bytes": sum(int(record["size"]) for record in helper_records.values()),
         "files": {},
-        "required_vendor_assets": requirement_records,
+        "required_vendor_assets": primary_set["required_vendor_assets"],
+        "compatible_vendor_asset_sets": compatible_sets,
         "importer": {
             "path": "/usr/local/sbin/libreecho-vendor-import",
             "sha256": CONNECTIVITY_IMPORTER_SHA256,
             "size": len(importer_data),
             "mode": "0755",
         },
-        "requirements_manifest": {
-            "path": f"/etc/libreecho/vendor-assets/{CONNECTIVITY_BUNDLE_ID}.tsv",
-            "sha256": sha256(specification_data),
-            "size": len(specification_data),
-            "mode": "0644",
-        },
+        "requirements_manifest": primary_set["requirements_manifest"],
         "helpers": helper_records,
         "symlinks": runtime_symlinks,
     }
@@ -406,6 +444,9 @@ def add_overlay(stage: Path, overlay: Path, busybox: Path, loader: Path,
         ),
         "vendor-assets/mt8163-v181-stock-v1.tsv": (
             "etc/libreecho/vendor-assets/mt8163-v181-stock-v1.tsv", 0o644,
+        ),
+        "vendor-assets/mt8163-v181-stock-v2.tsv": (
+            "etc/libreecho/vendor-assets/mt8163-v181-stock-v2.tsv", 0o644,
         ),
         "libreecho-update": ("usr/local/sbin/libreecho-update", 0o755),
         "libreecho-update-fetch": ("usr/local/sbin/libreecho-update-fetch", 0o755),
