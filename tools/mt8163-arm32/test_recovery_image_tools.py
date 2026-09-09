@@ -432,6 +432,83 @@ class SourceTests(unittest.TestCase):
             self.assertNotEqual(second.returncode, 0)
             self.assertFalse((firmware / "WIFI_RAM_CODE").exists())
 
+    def test_vendor_import_accepts_a_complete_compatible_asset_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            importer, _data, source, firmware, environment, records = (
+                self.vendor_import_fixture(root)
+            )
+            compatible_payloads = {
+                "ROMv2_lm_patch_1_0_hdr.bin": b"compatible-patch-zero",
+                "ROMv2_lm_patch_1_1_hdr.bin": b"compatible-patch-one",
+                "WIFI_RAM_CODE_8163": b"wifi-code",
+                "WMT_SOC.cfg": b"wmt-config",
+            }
+            payload_root = source / "system/vendor/firmware"
+            compatible_lines = []
+            for source_name, target_name, _payload in records:
+                payload = compatible_payloads[target_name]
+                (payload_root / target_name).write_bytes(payload)
+                compatible_lines.append(
+                    f"{hashlib.sha256(payload).hexdigest()}|{len(payload)}|"
+                    f"{source_name}|{target_name}\n"
+                )
+            compatible_spec = root / "compatible-assets.tsv"
+            compatible_spec.write_text("".join(compatible_lines))
+            primary_spec = environment.pop("LIBREECHO_VENDOR_SPEC")
+            environment["LIBREECHO_VENDOR_SPECS"] = (
+                f"{primary_spec}:{compatible_spec}"
+            )
+
+            result = subprocess.run(
+                ["/bin/sh", str(importer)], env=environment,
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("verification=hash-pinned", result.stdout)
+            for target_name, payload in compatible_payloads.items():
+                self.assertEqual((firmware / target_name).read_bytes(), payload)
+
+    def test_vendor_import_rejects_mixed_pinned_asset_sets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            importer, _data, source, firmware, environment, records = (
+                self.vendor_import_fixture(root)
+            )
+            payload_root = source / "system/vendor/firmware"
+            compatible_payloads = {
+                "ROMv2_lm_patch_1_0_hdr.bin": b"compatible-patch-zero",
+                "ROMv2_lm_patch_1_1_hdr.bin": b"compatible-patch-one",
+                "WIFI_RAM_CODE_8163": b"wifi-code",
+                "WMT_SOC.cfg": b"wmt-config",
+            }
+            compatible_lines = []
+            for source_name, target_name, _payload in records:
+                payload = compatible_payloads[target_name]
+                compatible_lines.append(
+                    f"{hashlib.sha256(payload).hexdigest()}|{len(payload)}|"
+                    f"{source_name}|{target_name}\n"
+                )
+            compatible_spec = root / "compatible-assets.tsv"
+            compatible_spec.write_text("".join(compatible_lines))
+            (payload_root / "ROMv2_lm_patch_1_1_hdr.bin").write_bytes(
+                compatible_payloads["ROMv2_lm_patch_1_1_hdr.bin"]
+            )
+            primary_spec = environment.pop("LIBREECHO_VENDOR_SPEC")
+            environment["LIBREECHO_VENDOR_SPECS"] = (
+                f"{primary_spec}:{compatible_spec}"
+            )
+
+            result = subprocess.run(
+                ["/bin/sh", str(importer)], env=environment,
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("VENDOR_IMPORT_NO_HASH_PINNED_SET", result.stderr)
+            self.assertFalse((firmware / "WIFI_RAM_CODE").exists())
+
     def test_vendor_import_probes_stock_system_root_layouts(self) -> None:
         for layout in ("etc/firmware", "vendor/firmware", "system/etc/firmware"):
             with self.subTest(layout=layout), tempfile.TemporaryDirectory() as temporary:
@@ -1661,18 +1738,46 @@ class VendorAssetContractTests(unittest.TestCase):
                 "sha256": "302bd4462de99c028c04092e561c1500d65582ce42a93c4c72ccae6e2c99013d",
             },
         }
+        compatible = {
+            **expected,
+            "ROMv2_lm_patch_1_0_hdr.bin": {
+                "source": "etc/firmware/ROMv2_lm_patch_1_0_hdr.bin",
+                "mode": 0o644, "size": 128720,
+                "sha256": "b4460117f51a43f3284594ec08d8c8861ecc0e42b17820987da03ecabdebac1e",
+            },
+            "ROMv2_lm_patch_1_1_hdr.bin": {
+                "source": "etc/firmware/ROMv2_lm_patch_1_1_hdr.bin",
+                "mode": 0o644, "size": 50148,
+                "sha256": "10c4ed22a10b8a136bffd7ffce4d552300d76f8e593627d2a9841c3b11a5697e",
+            },
+        }
         verifier_expected = {
             name: {key: value for key, value in record.items() if key != "mode"}
             for name, record in expected.items()
         }
+        verifier_compatible = {
+            name: {key: value for key, value in record.items() if key != "mode"}
+            for name, record in compatible.items()
+        }
         self.assertEqual(builder.CONNECTIVITY_ASSET_REQUIREMENTS, expected)
         self.assertEqual(verifier.CONNECTIVITY_ASSET_REQUIREMENTS, verifier_expected)
-        specification = TOOLS_DIR / "initramfs/vendor-assets/mt8163-v181-stock-v1.tsv"
-        expected_text = "".join(
-            f"{record['sha256']}|{record['size']}|{record['source']}|{name}\n"
-            for name, record in expected.items()
+        self.assertEqual(
+            builder.CONNECTIVITY_COMPATIBLE_ASSET_REQUIREMENTS, compatible
         )
-        self.assertEqual(specification.read_text(), expected_text)
+        self.assertEqual(
+            verifier.CONNECTIVITY_COMPATIBLE_ASSET_REQUIREMENTS,
+            verifier_compatible,
+        )
+        for bundle_id, records in (
+            ("mt8163-v181-stock-v1", expected),
+            ("mt8163-v181-stock-v2", compatible),
+        ):
+            specification = TOOLS_DIR / f"initramfs/vendor-assets/{bundle_id}.tsv"
+            expected_text = "".join(
+                f"{record['sha256']}|{record['size']}|{record['source']}|{name}\n"
+                for name, record in records.items()
+            )
+            self.assertEqual(specification.read_text(), expected_text)
 
     def test_vendor_importer_is_externally_pinned(self) -> None:
         importer = TOOLS_DIR / "initramfs/libreecho-vendor-import"

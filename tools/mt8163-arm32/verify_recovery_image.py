@@ -38,7 +38,8 @@ ZIMAGE_MAGIC = 0x016F2818
 ZIMAGE_SHA256 = "4e144959eb0ffaee91b37d05a0f871863a74f4abb1bad0474c2fec358d5176a6"
 SYSTEM_MAP_SHA256 = "527292112edd28e8facf2998eefe2224b08a05b193efc73634cd998e9113ba95"
 CONNECTIVITY_BUNDLE_ID = "mt8163-v181-stock-v1"
-CONNECTIVITY_IMPORTER_SHA256 = "7601145a15750abce6a4c21d20326ecbdc1e4dc36e5670c0ca3cc9d1bf1f1326"
+CONNECTIVITY_COMPATIBLE_BUNDLE_ID = "mt8163-v181-stock-v2"
+CONNECTIVITY_IMPORTER_SHA256 = "9597087d910db2eaee7ca6629f763cf9331bc9e859f318d833edf35628b5481b"
 CONNECTIVITY_STOCK_SYSTEM_SHA256 = "56540b3a9ac4437901a5510d9fb5e09b1a8d0cc229548f0b08bb5c22d78684fe"
 CONNECTIVITY_EVIDENCE_MANIFEST_SHA256 = "d1eedd04efe0dbc78853f2b0f9357c092b4ca66242648908c0369956538441eb"
 WPA_SUPPLICANT_VERSION = "2.10"
@@ -65,6 +66,7 @@ OVERLAY_FILES = {
     "libreecho-data-cleanup": 0o755,
     "libreecho-vendor-import": 0o755,
     "vendor-assets/mt8163-v181-stock-v1.tsv": 0o644,
+    "vendor-assets/mt8163-v181-stock-v2.tsv": 0o644,
     "libreecho-update": 0o755,
     "libreecho-update-fetch": 0o755,
     "ota-source.conf": 0o644,
@@ -78,6 +80,9 @@ OVERLAY_TARGETS = {
     "libreecho-vendor-import": "usr/local/sbin/libreecho-vendor-import",
     "vendor-assets/mt8163-v181-stock-v1.tsv": (
         "etc/libreecho/vendor-assets/mt8163-v181-stock-v1.tsv"
+    ),
+    "vendor-assets/mt8163-v181-stock-v2.tsv": (
+        "etc/libreecho/vendor-assets/mt8163-v181-stock-v2.tsv"
     ),
     "libreecho-update": "usr/local/sbin/libreecho-update",
     "libreecho-update-fetch": "usr/local/sbin/libreecho-update-fetch",
@@ -157,6 +162,34 @@ CONNECTIVITY_ASSET_REQUIREMENTS: dict[str, dict[str, str | int]] = {
         "size": 119,
         "sha256": "302bd4462de99c028c04092e561c1500d65582ce42a93c4c72ccae6e2c99013d",
     },
+}
+
+CONNECTIVITY_COMPATIBLE_ASSET_REQUIREMENTS: dict[str, dict[str, str | int]] = {
+    "ROMv2_lm_patch_1_0_hdr.bin": {
+        "source": "etc/firmware/ROMv2_lm_patch_1_0_hdr.bin",
+        "size": 128720,
+        "sha256": "b4460117f51a43f3284594ec08d8c8861ecc0e42b17820987da03ecabdebac1e",
+    },
+    "ROMv2_lm_patch_1_1_hdr.bin": {
+        "source": "etc/firmware/ROMv2_lm_patch_1_1_hdr.bin",
+        "size": 50148,
+        "sha256": "10c4ed22a10b8a136bffd7ffce4d552300d76f8e593627d2a9841c3b11a5697e",
+    },
+    "WIFI_RAM_CODE_8163": {
+        "source": "etc/firmware/WIFI_RAM_CODE_8163",
+        "size": 373840,
+        "sha256": "9669cc9b03cfdc5e8fd4fd6e14c4c4050e8c196738ca4707eea12f14a6a8e64c",
+    },
+    "WMT_SOC.cfg": {
+        "source": "etc/firmware/WMT_SOC.cfg",
+        "size": 119,
+        "sha256": "302bd4462de99c028c04092e561c1500d65582ce42a93c4c72ccae6e2c99013d",
+    },
+}
+
+CONNECTIVITY_ASSET_SETS = {
+    CONNECTIVITY_BUNDLE_ID: CONNECTIVITY_ASSET_REQUIREMENTS,
+    CONNECTIVITY_COMPATIBLE_BUNDLE_ID: CONNECTIVITY_COMPATIBLE_ASSET_REQUIREMENTS,
 }
 
 CONNECTIVITY_HELPERS = {
@@ -890,25 +923,51 @@ def validate_connectivity(entries: dict[str, Entry], manifest: dict[str, object]
             fail(f"connectivity local-extraction policy changed for {key}")
     validate_connectivity_runtime_symlinks(entries, record)
 
-    expected_requirements: dict[str, object] = {}
-    expected_spec_lines = []
-    for target_name, specification in CONNECTIVITY_ASSET_REQUIREMENTS.items():
-        source_name = str(specification["source"])
-        expected_size = int(specification["size"])
-        expected_hash = str(specification["sha256"])
-        expected_spec_lines.append(
-            f"{expected_hash}|{expected_size}|{source_name}|{target_name}\n"
-        )
-        expected_requirements[target_name] = {
-            "source": source_name,
-            "sha256": expected_hash,
-            "size": expected_size,
-            "mode": "0600",
-            "persistent_path": f"/data/libreecho/vendor/{CONNECTIVITY_BUNDLE_ID}/{target_name}",
-            "runtime_path": f"/lib/firmware/{target_name}",
+    compatible_sets: dict[str, dict[str, object]] = {}
+    for bundle_id, asset_requirements in CONNECTIVITY_ASSET_SETS.items():
+        expected_requirements: dict[str, object] = {}
+        expected_spec_lines = []
+        for target_name, specification in asset_requirements.items():
+            source_name = str(specification["source"])
+            expected_size = int(specification["size"])
+            expected_hash = str(specification["sha256"])
+            expected_spec_lines.append(
+                f"{expected_hash}|{expected_size}|{source_name}|{target_name}\n"
+            )
+            expected_requirements[target_name] = {
+                "source": source_name,
+                "sha256": expected_hash,
+                "size": expected_size,
+                "mode": "0600",
+                "persistent_path": f"/data/libreecho/vendor/{bundle_id}/{target_name}",
+                "runtime_path": f"/lib/firmware/{target_name}",
+            }
+        expected_spec = "".join(expected_spec_lines).encode()
+        spec_name = f"etc/libreecho/vendor-assets/{bundle_id}.tsv"
+        spec_member = require_member(entries, spec_name, sha256(expected_spec), 0o644)
+        if spec_member.data != expected_spec:
+            fail("local vendor requirements manifest content changed")
+        compatible_sets[bundle_id] = {
+            "required_vendor_assets": expected_requirements,
+            "required_vendor_bytes": sum(
+                int(specification["size"])
+                for specification in asset_requirements.values()
+            ),
+            "requirements_manifest": {
+                "path": "/" + spec_name,
+                "sha256": sha256(expected_spec),
+                "size": len(expected_spec),
+                "mode": "0644",
+            },
         }
-    if not strictly_equal(record.get("required_vendor_assets"), expected_requirements):
+
+    primary_set = compatible_sets[CONNECTIVITY_BUNDLE_ID]
+    if not strictly_equal(
+        record.get("required_vendor_assets"), primary_set["required_vendor_assets"]
+    ):
         fail("connectivity local vendor requirements changed")
+    if not strictly_equal(record.get("compatible_vendor_asset_sets"), compatible_sets):
+        fail("connectivity compatible vendor requirements changed")
 
     forbidden = sorted(
         name for name in entries
@@ -918,17 +977,7 @@ def validate_connectivity(entries: dict[str, Entry], manifest: dict[str, object]
     if forbidden:
         fail(f"stock Android connectivity userspace remains embedded: {forbidden}")
 
-    expected_spec = "".join(expected_spec_lines).encode()
-    spec_name = f"etc/libreecho/vendor-assets/{CONNECTIVITY_BUNDLE_ID}.tsv"
-    spec_member = require_member(entries, spec_name, sha256(expected_spec), 0o644)
-    if spec_member.data != expected_spec:
-        fail("local vendor requirements manifest content changed")
-    if record.get("requirements_manifest") != {
-        "path": "/" + spec_name,
-        "sha256": sha256(expected_spec),
-        "size": len(expected_spec),
-        "mode": "0644",
-    }:
+    if record.get("requirements_manifest") != primary_set["requirements_manifest"]:
         fail("local vendor requirements manifest record changed")
 
     raw_importer = record.get("importer")

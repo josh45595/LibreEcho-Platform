@@ -6,7 +6,15 @@ set -eu
 DATA_ROOT=${DATA_ROOT:-/data}
 TEST_MODE=${LIBREECHO_VENDOR_TEST_MODE:-0}
 BUNDLE_ID=mt8163-v181-stock-v1
-SPEC=${LIBREECHO_VENDOR_SPEC:-/etc/libreecho/vendor-assets/$BUNDLE_ID.tsv}
+PRIMARY_SPEC=/etc/libreecho/vendor-assets/$BUNDLE_ID.tsv
+COMPATIBLE_SPEC=/etc/libreecho/vendor-assets/mt8163-v181-stock-v2.tsv
+if [ -n "${LIBREECHO_VENDOR_SPECS:-}" ]; then
+    SPEC_LIST=$LIBREECHO_VENDOR_SPECS
+elif [ -n "${LIBREECHO_VENDOR_SPEC:-}" ]; then
+    SPEC_LIST=$LIBREECHO_VENDOR_SPEC
+else
+    SPEC_LIST="$PRIMARY_SPEC:$COMPATIBLE_SPEC"
+fi
 FIRMWARE_ROOT=${LIBREECHO_VENDOR_FIRMWARE_ROOT:-/lib/firmware}
 SYSTEM_A_DEV=${LIBREECHO_VENDOR_SYSTEM_A_DEV:-/dev/mmcblk0p13}
 SYSTEM_A_SYSFS=${LIBREECHO_VENDOR_SYSTEM_A_SYSFS:-/sys/class/block/mmcblk0p13}
@@ -17,7 +25,8 @@ FORCE_MARKER=${LIBREECHO_VENDOR_FORCE_MARKER:-$DATA_ROOT/libreecho/config/vendor
 MOUNT_ROOT=/tmp/libreecho-stock-system-a
 SOURCE_LAYOUTS='etc/firmware vendor/firmware system/vendor/firmware system/etc/firmware'
 STAGE=
-ACTIVE_SPEC=$SPEC
+ACTIVE_SPEC=
+FORCE_SPEC=
 STAGE_PARENT_CREATED=0
 MOUNTED=0
 FORCE_REQUESTED=0
@@ -95,7 +104,8 @@ trap cleanup EXIT HUP INT TERM
 
 validate_spec()
 {
-    [ -f "$SPEC" ] && [ ! -L "$SPEC" ] || fail VENDOR_IMPORT_SPEC_MISSING
+    candidate_spec=$1
+    [ -f "$candidate_spec" ] && [ ! -L "$candidate_spec" ] || fail VENDOR_IMPORT_SPEC_MISSING
     count=0
     while IFS='|' read -r expected_hash expected_size source_name target_name; do
         [ -n "$expected_hash" ] || continue
@@ -116,8 +126,22 @@ validate_spec()
         esac
         [ "${source_name##*/}" = "$target_name" ] || fail VENDOR_IMPORT_SPEC_SOURCE_TARGET_MISMATCH
         count=$((count + 1))
-    done < "$SPEC"
+    done < "$candidate_spec"
     [ "$count" -eq 4 ] || fail VENDOR_IMPORT_SPEC_COUNT_INVALID
+}
+
+validate_specs()
+{
+    old_ifs=$IFS
+    IFS=:
+    for candidate_spec in $SPEC_LIST; do
+        IFS=$old_ifs
+        validate_spec "$candidate_spec"
+        [ -n "$FORCE_SPEC" ] || FORCE_SPEC=$candidate_spec
+        IFS=:
+    done
+    IFS=$old_ifs
+    [ -n "$FORCE_SPEC" ] || fail VENDOR_IMPORT_SPEC_MISSING
 }
 
 layout_is_safe()
@@ -173,6 +197,7 @@ layout_matches()
 {
     candidate_layout=$1
     candidate_mode=$2
+    candidate_spec=$3
     while IFS='|' read -r expected_hash expected_size source_name target_name; do
         [ -n "$expected_hash" ] || continue
         candidate=$SOURCE_ROOT/$candidate_layout/$target_name
@@ -183,29 +208,37 @@ layout_matches()
         else
             forced_file_is_compatible "$candidate" "$target_name" || return 1
         fi
-    done < "$SPEC"
+    done < "$candidate_spec"
     return 0
 }
 
 select_source_layout()
 {
     saw_symlink=0
-    for candidate_layout in $SOURCE_LAYOUTS; do
-        if layout_is_safe "$candidate_layout"; then
-            if layout_matches "$candidate_layout" pinned; then
-                SELECTED_LAYOUT=$candidate_layout
-                VERIFICATION=hash-pinned
-                return 0
+    old_ifs=$IFS
+    IFS=:
+    for candidate_spec in $SPEC_LIST; do
+        IFS=$old_ifs
+        for candidate_layout in $SOURCE_LAYOUTS; do
+            if layout_is_safe "$candidate_layout"; then
+                if layout_matches "$candidate_layout" pinned "$candidate_spec"; then
+                    ACTIVE_SPEC=$candidate_spec
+                    SELECTED_LAYOUT=$candidate_layout
+                    VERIFICATION=hash-pinned
+                    return 0
+                fi
+            else
+                layout_rc=$?
+                [ "$layout_rc" -eq 2 ] && saw_symlink=1
             fi
-        else
-            layout_rc=$?
-            [ "$layout_rc" -eq 2 ] && saw_symlink=1
-        fi
+        done
+        IFS=:
     done
+    IFS=$old_ifs
     if [ "$FORCE_REQUESTED" -eq 1 ]; then
         for candidate_layout in $SOURCE_LAYOUTS; do
             if layout_is_safe "$candidate_layout"; then
-                if layout_matches "$candidate_layout" forced; then
+                if layout_matches "$candidate_layout" forced "$FORCE_SPEC"; then
                     SELECTED_LAYOUT=$candidate_layout
                     VERIFICATION=forced-unverified
                     return 0
@@ -298,7 +331,7 @@ install_runtime_files()
 }
 
 prepare_status_path || fail VENDOR_IMPORT_STATUS_PATH_UNSAFE
-validate_spec
+validate_specs
 write_status
 
 [ -d "$DATA_ROOT" ] && [ ! -L "$DATA_ROOT" ] || fail VENDOR_IMPORT_DATA_ROOT_INVALID
@@ -357,7 +390,7 @@ if [ "$VERIFICATION" = forced-unverified ]; then
         actual_size=$(stat -c %s "$source")
         printf '%s|%s|%s/%s|%s\n' \
             "$actual_hash" "$actual_size" "$SELECTED_LAYOUT" "$target_name" "$target_name" >> "$ACTIVE_SPEC"
-    done < "$SPEC"
+    done < "$FORCE_SPEC"
 fi
 
 while IFS='|' read -r expected_hash expected_size source_name target_name; do
