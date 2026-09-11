@@ -1134,6 +1134,96 @@ class SourceTests(unittest.TestCase):
         self.assertIn("restart-record", updater)
         self.assertIn("restart_record=1", updater)
 
+    def test_owner_ota_public_key_is_staged_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+            maintainer = root / "maintainer.hex"
+            owner = root / "owner.hex"
+            maintainer.write_text("a" * 64 + "\n", encoding="ascii")
+            owner.write_text("b" * 64 + "\n", encoding="ascii")
+
+            maintainer_data, owner_data = builder.stage_ota_public_keys(
+                stage, maintainer, owner
+            )
+
+            self.assertEqual(maintainer_data, b"a" * 64 + b"\n")
+            self.assertEqual(owner_data, b"b" * 64 + b"\n")
+            for name, expected in (
+                ("ota-public-key.hex", maintainer_data),
+                ("ota-owner-public-key.hex", owner_data),
+            ):
+                path = stage / "etc/libreecho" / name
+                self.assertEqual(path.read_bytes(), expected)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+
+            with self.assertRaisesRegex(SystemExit, "must differ"):
+                builder.stage_ota_public_keys(root / "same", maintainer, maintainer)
+
+            owner.write_text("not-a-public-key\n", encoding="ascii")
+            with self.assertRaisesRegex(SystemExit, "32-byte lowercase"):
+                builder.stage_ota_public_keys(root / "malformed", maintainer, owner)
+
+    def test_owner_ota_trust_is_additive_persistent_and_auditable(self) -> None:
+        updater = (TOOLS_DIR / "initramfs/libreecho-update").read_text()
+        self.assertIn("PUBLIC_KEY=/etc/libreecho/ota-public-key.hex", updater)
+        self.assertIn(
+            "PACKAGED_OWNER_KEY=/etc/libreecho/ota-owner-public-key.hex", updater
+        )
+        self.assertIn(
+            "OWNER_CONFIG=/data/libreecho/config",
+            updater,
+        )
+        self.assertIn(
+            "PERSISTENT_OWNER_KEY=$OWNER_CONFIG/ota-owner-public-key.hex", updater
+        )
+        verifier = updater[updater.index("verify_package_signature()"):]
+        self.assertLess(
+            verifier.index('"$VERIFY" "$PUBLIC_KEY"'),
+            verifier.index('"$VERIFY" "$PERSISTENT_OWNER_KEY"'),
+        )
+        self.assertLess(
+            verifier.index('"$VERIFY" "$PERSISTENT_OWNER_KEY"'),
+            verifier.index('"$VERIFY" "$PACKAGED_OWNER_KEY"'),
+        )
+        install = updater[updater.index("install_package()"):updater.index("confirm_pending()")]
+        self.assertLess(install.index("extract_and_verify"), install.index("seed_owner_key"))
+        self.assertLess(
+            install.index("seed_owner_key"),
+            install.index('dd if="$STAGING/boot.img" of="$target_device"'),
+        )
+        self.assertIn("persistent_owner_key_conflict", updater)
+        self.assertIn('echo "signing_authority=$SIGNING_AUTHORITY"', updater)
+        self.assertIn("signing_authority=$SIGNING_AUTHORITY", updater)
+
+    def test_owner_ota_public_key_image_contract_is_fail_closed(self) -> None:
+        data = b"b" * 64 + b"\n"
+        digest = hashlib.sha256(data).hexdigest()
+        path = "etc/libreecho/ota-owner-public-key.hex"
+        entries = {
+            path: verifier.Entry(
+                path, stat.S_IFREG | 0o644, 0, 0, 0, data
+            )
+        }
+        ota = {
+            "owner_public_key_sha256": digest,
+            "owner_public_key_persistence": (
+                "/data/libreecho/config/ota-owner-public-key.hex"
+            ),
+        }
+        verifier.validate_ota_owner_public_key(entries, ota, digest)
+
+        with self.assertRaisesRegex(SystemExit, "unexpected"):
+            verifier.validate_ota_owner_public_key(entries, ota, None)
+        with self.assertRaisesRegex(SystemExit, "hash mismatch"):
+            verifier.validate_ota_owner_public_key(entries, ota, "a" * 64)
+        with self.assertRaisesRegex(SystemExit, "persistence contract"):
+            verifier.validate_ota_owner_public_key(
+                entries,
+                {**ota, "owner_public_key_persistence": "/tmp/wrong"},
+                digest,
+            )
+
     def test_ota_bundle_signs_redistributable_policy(self) -> None:
         from nacl.signing import SigningKey
         with tempfile.TemporaryDirectory() as temporary:

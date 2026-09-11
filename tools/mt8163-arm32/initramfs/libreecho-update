@@ -11,6 +11,9 @@ LOCK=$UPDATE_ROOT/install.lock
 VERIFY=/usr/local/libexec/libreecho-update-verify
 BOOTCTL=/usr/local/sbin/libreecho-bootctl
 PUBLIC_KEY=/etc/libreecho/ota-public-key.hex
+PACKAGED_OWNER_KEY=/etc/libreecho/ota-owner-public-key.hex
+OWNER_CONFIG=/data/libreecho/config
+PERSISTENT_OWNER_KEY=$OWNER_CONFIG/ota-owner-public-key.hex
 CHANNEL_FILE=$UPDATE_ROOT/automatic-updates
 PACKAGED_CHANNEL_FILE=/etc/libreecho/update-channel
 # Set to 1 only by the manual-upload install path via the --allow-unsigned flag.
@@ -25,6 +28,7 @@ BOOT_SECTORS=32768
 STATE_DIRTY=0
 CURRENT_SERVICE_PROFILE=
 IDENTITY_SOURCE=
+SIGNING_AUTHORITY=
 
 die()
 {
@@ -83,6 +87,62 @@ seed_channel()
         [ "$channel" = dev ] || [ "$channel" = stable ] || die packaged_update_channel
         write_channel "$channel"
     }
+}
+
+seed_owner_key()
+{
+    [ -f "$PACKAGED_OWNER_KEY" ] && [ ! -L "$PACKAGED_OWNER_KEY" ] || return 0
+    packaged=$($BB cat "$PACKAGED_OWNER_KEY" 2>/dev/null) ||
+        die packaged_owner_key_unreadable
+    case "$packaged" in
+        ''|*[!0-9a-f]*) die packaged_owner_key_invalid ;;
+    esac
+    [ "${#packaged}" -eq 64 ] || die packaged_owner_key_invalid
+    if [ -e "$PERSISTENT_OWNER_KEY" ] || [ -L "$PERSISTENT_OWNER_KEY" ]; then
+        [ -f "$PERSISTENT_OWNER_KEY" ] && [ ! -L "$PERSISTENT_OWNER_KEY" ] ||
+            die persistent_owner_key_type
+        persistent=$($BB cat "$PERSISTENT_OWNER_KEY" 2>/dev/null) ||
+            die persistent_owner_key_unreadable
+        [ "$persistent" = "$packaged" ] || die persistent_owner_key_conflict
+        return 0
+    fi
+    if [ -e "$OWNER_CONFIG" ] || [ -L "$OWNER_CONFIG" ]; then
+        [ -d "$OWNER_CONFIG" ] && [ ! -L "$OWNER_CONFIG" ] ||
+            die owner_key_directory_type
+    else
+        $BB mkdir "$OWNER_CONFIG" && $BB chmod 0700 "$OWNER_CONFIG" ||
+            die owner_key_directory
+    fi
+    [ ! -e "$PERSISTENT_OWNER_KEY.tmp" ] && [ ! -L "$PERSISTENT_OWNER_KEY.tmp" ] ||
+        die owner_key_temp_exists
+    $BB cp "$PACKAGED_OWNER_KEY" "$PERSISTENT_OWNER_KEY.tmp" ||
+        die owner_key_copy
+    $BB chmod 0644 "$PERSISTENT_OWNER_KEY.tmp" &&
+        $BB mv "$PERSISTENT_OWNER_KEY.tmp" "$PERSISTENT_OWNER_KEY" ||
+        die owner_key_commit
+    $BB sync
+}
+
+verify_package_signature()
+{
+    manifest=$1
+    signature=$2
+    if "$VERIFY" "$PUBLIC_KEY" "$manifest" "$signature" 2>/dev/null; then
+        SIGNING_AUTHORITY=maintainer
+        return 0
+    fi
+    if [ -f "$PERSISTENT_OWNER_KEY" ] && [ ! -L "$PERSISTENT_OWNER_KEY" ] &&
+            "$VERIFY" "$PERSISTENT_OWNER_KEY" "$manifest" "$signature" 2>/dev/null; then
+        SIGNING_AUTHORITY=owner
+        return 0
+    fi
+    if [ -f "$PACKAGED_OWNER_KEY" ] && [ ! -L "$PACKAGED_OWNER_KEY" ] &&
+            "$VERIFY" "$PACKAGED_OWNER_KEY" "$manifest" "$signature" 2>/dev/null; then
+        SIGNING_AUTHORITY=owner
+        return 0
+    fi
+    "$VERIFY" "$PUBLIC_KEY" "$manifest" "$signature" || true
+    return 1
 }
 
 target_device_for_slot()
@@ -280,8 +340,9 @@ boot.img" ] || die package_member_contract
         die package_extracted_links
     if [ "$ALLOW_UNSIGNED" = 1 ]; then
         $BB printf 'libreecho-update: WARNING signature verification skipped (--allow-unsigned)\n' >&2
+        SIGNING_AUTHORITY=unsigned-manual
     else
-        "$VERIFY" "$PUBLIC_KEY" "$STAGING/manifest" "$STAGING/manifest.sig" ||
+        verify_package_signature "$STAGING/manifest" "$STAGING/manifest.sig" ||
             die package_signature
     fi
     verify_manifest
@@ -478,6 +539,7 @@ install_package()
     STATE_DIRTY=1
     state_write verifying 5 package
     extract_and_verify "$package"
+    seed_owner_key
     state_write verified 20 "$version"
     bootctl_status
     if [ "$FEATURE_POLICY" = preserve ]; then
@@ -498,6 +560,7 @@ install_package()
         echo "slot=$target"
         echo "boot_sha256=$boot_sha"
         echo "update_channel=$UPDATE_CHANNEL"
+        echo "signing_authority=$SIGNING_AUTHORITY"
         echo "feature_policy=$FEATURE_POLICY"
         if [ "$FEATURE_POLICY" = preserve ]; then
             write_preserved_feature_identity
@@ -571,7 +634,7 @@ inspect_package()
     require_userdata
     lock_take
     extract_and_verify "$package"
-    echo "UPDATE_VALID version=$version"
+    echo "UPDATE_VALID version=$version signing_authority=$SIGNING_AUTHORITY"
 }
 
 case "${1:-}" in

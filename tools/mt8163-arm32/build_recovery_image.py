@@ -542,8 +542,39 @@ def add_overlay(stage: Path, overlay: Path, busybox: Path, loader: Path,
     manifest["busybox_applets"] = {"count": len(applets), "names": applets}
 
 
+def read_ota_public_key(path: Path, label: str) -> bytes:
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit(f"ERROR: {label} is not a regular file: {path}")
+    data = read(path)
+    if not re.fullmatch(rb"[0-9a-f]{64}\n", data):
+        raise SystemExit(f"ERROR: {label} must be a 32-byte lowercase Ed25519 public key")
+    return data
+
+
+def stage_ota_public_keys(stage: Path, public_key: Path,
+                          owner_public_key: Path | None) -> tuple[bytes, bytes | None]:
+    key_data = read_ota_public_key(public_key, "OTA maintainer public key")
+    key_target = stage / "etc/libreecho/ota-public-key.hex"
+    key_target.parent.mkdir(parents=True, exist_ok=True)
+    key_target.write_bytes(key_data)
+    key_target.chmod(0o644)
+
+    owner_key_data = None
+    if owner_public_key is not None:
+        owner_key_data = read_ota_public_key(
+            owner_public_key, "OTA owner public key"
+        )
+        if owner_key_data == key_data:
+            raise SystemExit("ERROR: OTA owner and maintainer public keys must differ")
+        owner_key_target = stage / "etc/libreecho/ota-owner-public-key.hex"
+        owner_key_target.write_bytes(owner_key_data)
+        owner_key_target.chmod(0o644)
+    return key_data, owner_key_data
+
+
 def add_ota_tools(stage: Path, bootctl: Path, verifier: Path, public_key: Path,
-                  image_profile: str, service_profile: str, feature_policy: str,
+                  owner_public_key: Path | None, image_profile: str,
+                  service_profile: str, feature_policy: str,
                   update_channel: str, manifest: dict[str, object]) -> None:
     sources = (
         ("bootctl", bootctl, "usr/local/sbin/libreecho-bootctl",
@@ -569,13 +600,9 @@ def add_ota_tools(stage: Path, bootctl: Path, verifier: Path, public_key: Path,
             ),
         }
 
-    key_data = read(public_key)
-    if not re.fullmatch(rb"[0-9a-f]{64}\n", key_data):
-        raise SystemExit("ERROR: OTA Ed25519 public key must be 32-byte lowercase hex")
-    key_target = stage / "etc/libreecho/ota-public-key.hex"
-    key_target.parent.mkdir(parents=True, exist_ok=True)
-    key_target.write_bytes(key_data)
-    key_target.chmod(0o644)
+    key_data, owner_key_data = stage_ota_public_keys(
+        stage, public_key, owner_public_key
+    )
 
     profile_target = stage / "etc/libreecho/image-profile"
     profile_target.write_text(image_profile + "\n")
@@ -628,6 +655,11 @@ def add_ota_tools(stage: Path, bootctl: Path, verifier: Path, public_key: Path,
         "public_key_sha256": sha256(key_data),
         "tools": records,
     }
+    if owner_key_data is not None:
+        manifest["ota"]["owner_public_key_sha256"] = sha256(owner_key_data)
+        manifest["ota"]["owner_public_key_persistence"] = (
+            "/data/libreecho/config/ota-owner-public-key.hex"
+        )
 
 
 def add_audio_probe(stage: Path, audio_probe: Path,
@@ -2102,6 +2134,10 @@ def main() -> None:
     parser.add_argument("--bootctl", type=Path, required=True)
     parser.add_argument("--update-verifier", type=Path, required=True)
     parser.add_argument("--ota-public-key", type=Path, required=True)
+    parser.add_argument(
+        "--ota-owner-public-key", type=Path,
+        help="optional owner Ed25519 public key to trust in addition to the maintainer key",
+    )
     parser.add_argument("--audio-probe", type=Path,
                         help="static ARM32 ALSA capability probe to add to the initramfs")
     parser.add_argument("--tinyplay", type=Path,
@@ -2513,7 +2549,10 @@ def main() -> None:
         )
         add_ota_tools(
             stage, args.bootctl.resolve(), args.update_verifier.resolve(),
-            args.ota_public_key.resolve(), args.image_profile,
+            args.ota_public_key.resolve(),
+            args.ota_owner_public_key.resolve()
+            if args.ota_owner_public_key is not None else None,
+            args.image_profile,
             args.service_profile, args.feature_policy, args.update_channel, manifest,
         )
         if args.audio_probe is not None:
