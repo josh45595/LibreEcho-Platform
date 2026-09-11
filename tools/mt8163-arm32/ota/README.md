@@ -76,6 +76,25 @@ five-payload graph with the separately licensed CC-BY-NC-SA wakeword model;
 with AirPlay, STT, TTS, and assistant present and wakeword absent; `exclude`
 remains the diagnostic payload-free graph.
 
+### Optional owner signing authority
+
+An owner build may add a second Ed25519 public key with
+`--ota-owner-public-key`. The maintainer key remains embedded at
+`/etc/libreecho/ota-public-key.hex`; it is never replaced by the owner key. The
+owner key is embedded separately and, after a package has passed signature and
+manifest validation, is atomically seeded to
+`/data/libreecho/config/ota-owner-public-key.hex` before any boot partition
+write. A different persistent key is rejected rather than silently rotated.
+
+The updater accepts a package when its manifest signature verifies under the
+maintainer key or the owner key and records the selected signing authority in
+the update transaction. Unknown signers and malformed keys remain rejected.
+The persistent owner key survives normal A/B updates because userdata is not an
+OTA write target. An exact maintainer image that predates this multi-authority
+logic will retain the key bytes in userdata but will not consult them; continuous
+owner authority across maintainer releases therefore requires the installed
+release to retain this updater capability.
+
 ### Preserved payload identity and acceptance boundary
 
 The `preserve` policy retains the existing feature payloads under

@@ -436,6 +436,23 @@ def require_member(entries: dict[str, Entry], name: str, expected_hash: str,
     return entry
 
 
+def validate_ota_owner_public_key(
+        entries: dict[str, Entry], ota: dict[str, object],
+        expected_hash: str | None) -> None:
+    path = "etc/libreecho/ota-owner-public-key.hex"
+    manifest_hash = ota.get("owner_public_key_sha256")
+    if expected_hash is None:
+        if manifest_hash is not None or path in entries:
+            fail("unexpected OTA owner public key")
+        return
+    require_member(entries, path, expected_hash, 0o644)
+    if manifest_hash != expected_hash:
+        fail("OTA owner public-key manifest identity mismatch")
+    if ota.get("owner_public_key_persistence") != (
+            "/data/libreecho/config/ota-owner-public-key.hex"):
+        fail("OTA owner public-key persistence contract mismatch")
+
+
 def resolve_relative_symlink(name: str, target: str) -> str:
     components = target.split("/")
     if (
@@ -1034,6 +1051,7 @@ def validate_initramfs(ramdisk: bytes, manifest: dict[str, object],
                        expected_bootctl_sha256: str,
                        expected_update_verifier_sha256: str,
                        expected_ota_public_key_sha256: str,
+                       expected_ota_owner_public_key_sha256: str | None,
                        expected_adbd_sha256: str,
                        expected_audio_probe_sha256: str | None,
                        expected_tinyplay_sha256: str | None,
@@ -1128,6 +1146,9 @@ def validate_initramfs(ramdisk: bytes, manifest: dict[str, object],
     )
     if ota.get("public_key_sha256") != expected_ota_public_key_sha256:
         fail("OTA public-key manifest identity mismatch")
+    validate_ota_owner_public_key(
+        entries, ota, expected_ota_owner_public_key_sha256
+    )
     network = manifest.get("network", {"enabled": False})
     if not isinstance(network, dict) or not isinstance(network.get("enabled"), bool):
         fail("network manifest record is malformed")
@@ -1922,6 +1943,7 @@ def main() -> None:
     parser.add_argument("--expected-bootctl-sha256", required=True)
     parser.add_argument("--expected-update-verifier-sha256", required=True)
     parser.add_argument("--expected-ota-public-key-sha256", required=True)
+    parser.add_argument("--expected-ota-owner-public-key-sha256")
     parser.add_argument("--expected-adbd-sha256", required=True)
     parser.add_argument("--expected-dropbear-sha256",
                         help="require this static ARM32 Dropbear server in the initramfs")
@@ -2075,7 +2097,8 @@ def main() -> None:
         args.expected_service_profile, args.expected_feature_policy,
         args.expected_update_channel, args.expected_busybox_sha256, args.expected_musl_loader_sha256,
         args.expected_bootctl_sha256, args.expected_update_verifier_sha256,
-        args.expected_ota_public_key_sha256, args.expected_adbd_sha256,
+        args.expected_ota_public_key_sha256,
+        args.expected_ota_owner_public_key_sha256, args.expected_adbd_sha256,
         args.expected_audio_probe_sha256,
         args.expected_tinyplay_sha256, args.expected_tinycap_sha256,
         args.expected_tinymix_sha256,
